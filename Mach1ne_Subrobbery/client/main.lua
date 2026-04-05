@@ -325,16 +325,7 @@ end
 local function spawnHeistNPC()
     local coords = Config.HeistNPC.coords
 
-    -- Blip for NPC
-    local blip = AddBlipForCoord(coords.x, coords.y, coords.z)
-    SetBlipSprite(blip, 487)
-    SetBlipDisplay(blip, 4)
-    SetBlipScale(blip, 0.8)
-    SetBlipColour(blip, 5)
-    SetBlipAsShortRange(blip, true)
-    BeginTextCommandSetBlipName('STRING')
-    AddTextComponentSubstringPlayerName('Ubåds Røveri')
-    EndTextCommandSetBlipName(blip)
+  
 
     heistNpcPed = createHeistPed()
 
