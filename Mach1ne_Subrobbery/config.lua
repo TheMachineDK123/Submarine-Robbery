@@ -14,13 +14,20 @@ Config.MoneyRewardMin = 750000
 Config.MoneyRewardMax = 1500000
 
 -- Items der gives til hver spiller efter heist (ud over penge)
+-- chance = % chance for at itemet droppes
+-- minCount/maxCount = tilfældigt antal der gives ved drop
+-- Hvis minCount/maxCount ikke er sat, bruges count (bagudkompatibelt)
+Config.ItemRewardDefaultChance = 100
+Config.ItemRewardDefaultMin = 1
+Config.ItemRewardDefaultMax = 1
+
 -- Sæt til {} for ingen items
 Config.ItemRewards = {
-    { item = 'weapon_pistol', count = 3 },
-    { item = 'ammo', count = 150 },
-    { item = 'drivingplan', count = 2 },
-    -- { item = 'black_money', count = 50 },
-    -- { item = 'diamond', count = 2 },
+    { item = 'weapon_pistol', chance = 35, minCount = 1, maxCount = 2 },
+    { item = 'ammo', chance = 100, minCount = 60, maxCount = 150 },
+    { item = 'drivingplan', chance = 60, minCount = 1, maxCount = 2 },
+    -- { item = 'black_money', chance = 25, minCount = 20, maxCount = 50 },
+    -- { item = 'diamond', chance = 10, minCount = 1, maxCount = 2 },
 }
 
 -- Krav for at starte heistet + forbrug under heistet
@@ -161,4 +168,11 @@ Config.DetonationBlip = {
     colour = 1,
     scale = 0.8,
     label = 'Detoner C4',
+}
+
+-- Debug tools (kun til test på dev-server)
+Config.Debug = {
+    Enabled = true,
+    ForceCompleteCommand = 'sub_debug_complete',
+    AdminOnly = false,
 }
