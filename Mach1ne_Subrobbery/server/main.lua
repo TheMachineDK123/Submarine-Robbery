@@ -6,6 +6,7 @@ local PlayerHeist = {} -- serverId -> heistId
 local HeistIdCounter = 0
 local GlobalCooldown = 0
 local EventThrottle = {}
+local logHeist
 
 math.randomseed(os.time())
 
@@ -22,6 +23,153 @@ local function getRandomMoneyReward()
     end
 
     return tonumber(Config.MoneyReward) or 0
+end
+
+local function parseItemRewardConfig(reward)
+    local itemName = reward and reward.item or nil
+
+    local defaultChance = tonumber(Config.ItemRewardDefaultChance) or 100
+    local chance = tonumber(reward and reward.chance)
+    if chance == nil then
+        chance = defaultChance
+    end
+    chance = math.floor(math.max(0, math.min(100, chance)))
+
+    local defaultMin = tonumber(Config.ItemRewardDefaultMin) or 1
+    local defaultMax = tonumber(Config.ItemRewardDefaultMax) or defaultMin
+    if defaultMax < defaultMin then
+        defaultMin, defaultMax = defaultMax, defaultMin
+    end
+
+    local minCount = tonumber(reward and reward.minCount)
+    local maxCount = tonumber(reward and reward.maxCount)
+
+    -- Bagudkompatibilitet: brug count hvis min/max ikke er sat
+    if minCount == nil and maxCount == nil then
+        local legacyCount = tonumber(reward and reward.count)
+        if legacyCount ~= nil then
+            minCount = legacyCount
+            maxCount = legacyCount
+        end
+    end
+
+    minCount = math.floor(minCount or defaultMin)
+    maxCount = math.floor(maxCount or defaultMax)
+
+    if minCount < 0 then minCount = 0 end
+    if maxCount < minCount then maxCount = minCount end
+
+    return {
+        item = itemName,
+        chance = chance,
+        minCount = minCount,
+        maxCount = maxCount,
+    }
+end
+
+local function rollItemRewardCount(reward)
+    local cfg = parseItemRewardConfig(reward)
+
+    if not cfg.item or cfg.item == '' then
+        return 0, cfg
+    end
+
+    if cfg.maxCount <= 0 then
+        return 0, cfg
+    end
+
+    if math.random(1, 100) > cfg.chance then
+        return 0, cfg
+    end
+
+    local amount = cfg.minCount
+    if cfg.maxCount > cfg.minCount then
+        amount = math.random(cfg.minCount, cfg.maxCount)
+    end
+
+    return amount, cfg
+end
+
+local function finalizeHeistCompletion(heistId, options)
+    options = options or {}
+
+    local heist = ActiveHeists[heistId]
+    if not heist then
+        return false, 'Heistet blev ikke fundet.'
+    end
+
+    if heist.state == 'completed' then
+        return false, 'Heistet er allerede fuldført.'
+    end
+
+    heist.state = 'completed'
+    heist.heistId = heistId
+    heist.completedAt = os.time()
+
+    if not options.skipDetonationScene then
+        for _, memberId in ipairs(heist.members) do
+            TriggerClientEvent('mach1ne_sub:client:detonateScene', memberId, heistId)
+        end
+        Wait(8000) -- Vent på eksplosions-animation
+    end
+
+    local payoutData = {
+        payouts = {},
+        totalMoney = 0,
+    }
+
+    for _, memberId in ipairs(heist.members) do
+        local xMember = ESX.GetPlayerFromId(memberId)
+        if xMember then
+            local moneyReward = getRandomMoneyReward()
+            payoutData.totalMoney = payoutData.totalMoney + moneyReward
+
+            xMember.addAccountMoney('money', moneyReward, 'Submarine Heist Reward')
+            TriggerClientEvent('ox_lib:notify', memberId, { type = 'success', description = ('Du modtog $%s!'):format(formatMoney(moneyReward)) })
+
+            table.insert(payoutData.payouts, {
+                id = memberId,
+                identifier = xMember.getIdentifier(),
+                name = xMember.getName(),
+                amount = moneyReward,
+            })
+
+            for _, reward in ipairs(Config.ItemRewards) do
+                local amount, cfg = rollItemRewardCount(reward)
+                if amount > 0 then
+                    exports.ox_inventory:AddItem(memberId, cfg.item, amount)
+                    TriggerClientEvent('ox_lib:notify', memberId, {
+                        type = 'success',
+                        description = ('Du modtog %dx %s!'):format(amount, cfg.item)
+                    })
+                end
+            end
+        end
+    end
+
+    logHeist(heist, payoutData)
+
+    local cleanupDelay = tonumber(options.cleanupDelayMs)
+    if cleanupDelay == nil then
+        cleanupDelay = options.skipDetonationScene and 0 or 5000
+    end
+    if cleanupDelay > 0 then
+        Wait(cleanupDelay)
+    end
+
+    for _, memberId in ipairs(heist.members) do
+        PlayerHeist[memberId] = nil
+        EventThrottle[memberId] = nil
+        TriggerClientEvent('mach1ne_sub:client:heistCompleted', memberId)
+    end
+
+    ActiveHeists[heistId] = nil
+
+    if not options.skipCooldown then
+        GlobalCooldown = os.time() + (Config.HeistCooldown * 60)
+    end
+
+    return true, nil
 end
 
 -- ========================
@@ -122,7 +270,7 @@ local function notifyPoliceSubmarineBreach(heist)
     end
 end
 
-local function logHeist(heist, logData)
+logHeist = function(heist, logData)
     if not Config.DiscordWebhook or Config.DiscordWebhook == '' then return end
 
     local memberLines = {}
@@ -146,9 +294,16 @@ local function logHeist(heist, logData)
     if #Config.ItemRewards > 0 then
         local itemLines = {}
         for _, reward in ipairs(Config.ItemRewards) do
-            table.insert(itemLines, ('%dx %s'):format(reward.count, reward.item))
+            local cfg = parseItemRewardConfig(reward)
+            if cfg.item and cfg.item ~= '' then
+                if cfg.minCount == cfg.maxCount then
+                    table.insert(itemLines, ('%s%%: %dx %s'):format(cfg.chance, cfg.minCount, cfg.item))
+                else
+                    table.insert(itemLines, ('%s%%: %d-%dx %s'):format(cfg.chance, cfg.minCount, cfg.maxCount, cfg.item))
+                end
+            end
         end
-        itemText = table.concat(itemLines, ', ')
+        itemText = #itemLines > 0 and table.concat(itemLines, ', ') or 'Ingen'
     end
 
     local payoutLines = {}
@@ -802,64 +957,65 @@ RegisterNetEvent('mach1ne_sub:server:detonate', function()
         return
     end
 
-    heist.state = 'completed'
-    heist.heistId = heistId
-    heist.completedAt = os.time()
+    finalizeHeistCompletion(heistId, {
+        skipDetonationScene = false,
+        skipCooldown = false,
+    })
+end)
 
-    -- Eksplosions-scene for alle members
-    for _, memberId in ipairs(heist.members) do
-        TriggerClientEvent('mach1ne_sub:client:detonateScene', memberId, heistId)
+RegisterCommand((Config.Debug and Config.Debug.ForceCompleteCommand) or 'sub_debug_complete', function(source, args)
+    local debugCfg = Config.Debug or {}
+
+    if not debugCfg.Enabled then
+        if source ~= 0 then
+            TriggerClientEvent('ox_lib:notify', source, { type = 'error', description = 'Debug command er deaktiveret i config.' })
+        else
+            print('[Mach1ne_Subrobbery] Debug command er deaktiveret i config.')
+        end
+        return
     end
 
-    -- Giv rewards
-    Wait(8000) -- Vent på eksplosions-animation
+    if source ~= 0 and debugCfg.AdminOnly and not IsPlayerAceAllowed(source, 'mach1ne_sub.debug') then
+        TriggerClientEvent('ox_lib:notify', source, { type = 'error', description = 'Du har ikke adgang til debug command.' })
+        return
+    end
 
-    local payoutData = {
-        payouts = {},
-        totalMoney = 0,
-    }
-
-    for _, memberId in ipairs(heist.members) do
-        local xMember = ESX.GetPlayerFromId(memberId)
-        if xMember then
-            -- Penge
-            local moneyReward = getRandomMoneyReward()
-            payoutData.totalMoney = payoutData.totalMoney + moneyReward
-
-            xMember.addAccountMoney('money', moneyReward, 'Submarine Heist Reward')
-            TriggerClientEvent('ox_lib:notify', memberId, { type = 'success', description = ('Du modtog $%s!'):format(formatMoney(moneyReward)) })
-
-            table.insert(payoutData.payouts, {
-                id = memberId,
-                identifier = xMember.getIdentifier(),
-                name = xMember.getName(),
-                amount = moneyReward,
-            })
-
-            -- Items
-            for _, reward in ipairs(Config.ItemRewards) do
-                exports.ox_inventory:AddItem(memberId, reward.item, reward.count)
-                TriggerClientEvent('ox_lib:notify', memberId, { type = 'success', description = ('Du modtog %dx %s!'):format(reward.count, reward.item) })
-            end
+    local heistId
+    if source == 0 then
+        heistId = tonumber(args[1])
+        if not heistId then
+            print('[Mach1ne_Subrobbery] Brug: /' .. ((debugCfg.ForceCompleteCommand) or 'sub_debug_complete') .. ' <heistId>')
+            return
+        end
+    else
+        heistId = PlayerHeist[source]
+        if not heistId or not ActiveHeists[heistId] then
+            TriggerClientEvent('ox_lib:notify', source, { type = 'error', description = 'Du er ikke i et aktivt heist.' })
+            return
         end
     end
 
-    -- Log heist v2 til Discord
-    logHeist(heist, payoutData)
+    local ok, reason = finalizeHeistCompletion(heistId, {
+        skipDetonationScene = true,
+        skipCooldown = true,
+        cleanupDelayMs = 0,
+    })
 
-    -- Cleanup
-    Wait(5000)
-    for _, memberId in ipairs(heist.members) do
-        PlayerHeist[memberId] = nil
-        EventThrottle[memberId] = nil
-        TriggerClientEvent('mach1ne_sub:client:heistCompleted', memberId)
+    if not ok then
+        if source ~= 0 then
+            TriggerClientEvent('ox_lib:notify', source, { type = 'error', description = reason or 'Kunne ikke force-complete heistet.' })
+        else
+            print('[Mach1ne_Subrobbery] Debug force-complete fejlede: ' .. tostring(reason))
+        end
+        return
     end
 
-    ActiveHeists[heistId] = nil
-
-    -- Sæt cooldown
-    GlobalCooldown = os.time() + (Config.HeistCooldown * 60)
-end)
+    if source ~= 0 then
+        TriggerClientEvent('ox_lib:notify', source, { type = 'success', description = 'Debug: Heist blev force-completed. Rewards er udbetalt.' })
+    else
+        print(('[Mach1ne_Subrobbery] Debug: Heist #%d force-completed.'):format(heistId))
+    end
+end, false)
 
 -- Sync guard death
 RegisterNetEvent('mach1ne_sub:server:guardKilled', function(guardIndex)
